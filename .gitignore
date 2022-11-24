@@ -1,0 +1,4 @@
+.idea/*
+venv/*
+.env
+muave-ml.iml
