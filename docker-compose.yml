@@ -1,0 +1,109 @@
+---
+services:
+  diffusion-webui:
+    build:
+      context: ./apps/diffusion-webui
+      dockerfile: Dockerfile
+    ports:
+      - 7850:7865
+    stdin_open: true
+    tty: true
+    volumes:
+      - "./apps/diffusion-webui/models:/home/muave/stable-diffusion-webui/models"
+      - "./apps/diffusion-webui/repositories:/home/muave/stable-diffusion-webui/repositories"
+      - "./apps/diffusion-webui/scripts:/home/muave/stable-diffusion-webui/scripts"
+      - "./apps/diffusion-webui/extensions:/home/muave/stable-diffusion-webui/extensions"
+      - "./apps/diffusion-webui/outputs:/home/muave/stable-diffusion-webui/outputs"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+#  jup:
+#    build:
+#      context: ./apps/jup
+#      dockerfile: Dockerfile
+#    stdin_open: true
+#    tty: true
+#    ports:
+#      - 8000:8000
+#    volumes:
+#      - "./apps/jup/config:/etc/jupyterhub"
+#      - "./apps/jup/srv:/srv/jupyterhub"
+#      - "./apps/jup/log:/var/log"
+#      - "./apps/jup/users:/home/muave/work"
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - capabilities: [gpu]
+  auth-postgresql:
+    image: docker.io/library/postgres:12-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - "./apps/authentik/database:/var/lib/postgresql/data"
+    environment:
+      - POSTGRES_PASSWORD=${PG_PASS:?database password required}
+      - POSTGRES_USER=${PG_USER:-authentik}
+      - POSTGRES_DB=${PG_DB:-authentik}
+    env_file:
+      - .env
+  auth-redis:
+    image: docker.io/library/redis:alpine
+    command: --save 60 1 --loglevel warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - "./apps/authentik/redis:/data"
+  auth-server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2022.11.1}
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: auth-redis
+      AUTHENTIK_POSTGRESQL__HOST: auth-postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      # AUTHENTIK_ERROR_REPORTING__ENABLED: "true"
+    volumes:
+      - "./apps/authentik/media:/media"
+      - "./apps/authentik/custom-templates:/templates"
+    env_file:
+      - .env
+    ports:
+      - "0.0.0.0:${AUTHENTIK_PORT_HTTP:-9000}:9000"
+      - "0.0.0.0:${AUTHENTIK_PORT_HTTPS:-9443}:9443"
+  auth-worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2022.11.1}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_REDIS__HOST: auth-redis
+      AUTHENTIK_POSTGRESQL__HOST: auth-postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      # AUTHENTIK_ERROR_REPORTING__ENABLED: "true"
+    # This is optional, and can be removed. If you remove this, the following will happen
+    # - The permissions for the /media folders aren't fixed, so make sure they are 1000:1000
+    # - The docker socket can't be accessed anymore
+    user: root
+    volumes:
+      - "./apps/authentik/media:/media"
+      - "./apps/authentik/certs:/certs"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./apps/authentik/custom-templates:/templates"
+    env_file:
+      - .env
