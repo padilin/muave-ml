@@ -14,5 +14,4 @@ USER muave
 EXPOSE 8000
 EXPOSE 8080
 EXPOSE 8081
-#CMD ["jupyterhub"]
-CMD ["/bin/bash"]
+CMD ["jupyterhub"]
