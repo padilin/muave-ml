@@ -1,24 +1,25 @@
 ---
+version: "3.7"
 services:
-  diffusion-webui:
-    build:
-      context: ./apps/diffusion-webui
-      dockerfile: Dockerfile
-    ports:
-      - 7850:7865
-    stdin_open: true
-    tty: true
-    volumes:
-      - "./apps/diffusion-webui/models:/home/muave/stable-diffusion-webui/models"
-      - "./apps/diffusion-webui/repositories:/home/muave/stable-diffusion-webui/repositories"
-      - "./apps/diffusion-webui/scripts:/home/muave/stable-diffusion-webui/scripts"
-      - "./apps/diffusion-webui/extensions:/home/muave/stable-diffusion-webui/extensions"
-      - "./apps/diffusion-webui/outputs:/home/muave/stable-diffusion-webui/outputs"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+#  diffusion-webui:
+#    build:
+#      context: ./apps/diffusion-webui
+#      dockerfile: Dockerfile
+#    ports:
+#      - 7850:7865
+#    stdin_open: true
+#    tty: true
+#    volumes:
+#      - "./apps/diffusion-webui/models:/home/muave/stable-diffusion-webui/models"
+#      - "./apps/diffusion-webui/repositories:/home/muave/stable-diffusion-webui/repositories"
+#      - "./apps/diffusion-webui/scripts:/home/muave/stable-diffusion-webui/scripts"
+#      - "./apps/diffusion-webui/extensions:/home/muave/stable-diffusion-webui/extensions"
+#      - "./apps/diffusion-webui/outputs:/home/muave/stable-diffusion-webui/outputs"
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - capabilities: [gpu]
 #  jup:
 #    build:
 #      context: ./apps/jup
@@ -32,6 +33,12 @@ services:
 #      - "./apps/jup/srv:/srv/jupyterhub"
 #      - "./apps/jup/log:/var/log"
 #      - "./apps/jup/users:/home/muave/work"
+#    labels:
+#      traefik.enable: true
+#      traefik.http.routers.jup.entrypoints: web
+#      traefik.http.services.jup.loadbalancer.server.port: 8000
+#      traefik.http.routers.jup.rule: Host(`hub.${MY_URL}`)
+#      traefik.http.routers.jup.middlewares: authentik@docker
 #    deploy:
 #      resources:
 #        reservations:
@@ -79,12 +86,18 @@ services:
       # AUTHENTIK_ERROR_REPORTING__ENABLED: "true"
     volumes:
       - "./apps/authentik/media:/media"
+      - "./apps/common/certs:/certs:ro"
       - "./apps/authentik/custom-templates:/templates"
     env_file:
       - .env
     ports:
       - "0.0.0.0:${AUTHENTIK_PORT_HTTP:-9000}:9000"
       - "0.0.0.0:${AUTHENTIK_PORT_HTTPS:-9443}:9443"
+    labels:
+      traefik.enable: true
+      traefik.http.routers.auth-server.entrypoints: websecure
+      traefik.http.routers.auth-server.tls.certresolver: myresolver
+      traefik.http.routers.auth-server.rule: Host(`auth.${MY_URL}`)
   auth-worker:
     image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2022.11.1}
     restart: unless-stopped
@@ -102,8 +115,65 @@ services:
     user: root
     volumes:
       - "./apps/authentik/media:/media"
-      - "./apps/authentik/certs:/certs"
+      - "./apps/common/certs:/certs:ro"
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "./apps/authentik/custom-templates:/templates"
     env_file:
       - .env
+  auth-proxy:
+    image: ghcr.io/goauthentik/proxy
+    ports:
+      - 9001:9000
+      - 9441:9443
+    environment:
+      AUTHENTIK_HOST: https://auth-server:9443
+      AUTHENTIK_INSECURE: "false"
+      AUTHENTIK_TOKEN: ${AUTHENTIK_PROXY_TOKEN}
+      AUTHENTIK_HOST_BROWSER: https://auth.${MY_URL}
+    labels:
+      traefik.enable: true
+      traefik.port: 9443
+      traefik.http.routers.auth-proxy.entrypoints: websecure
+      traefik.http.routers.auth-proxy.tls.certresolver: myresolver
+      traefik.http.routers.auth-proxy.rule: Host(`${MY_URL}`) && PathPrefix(`/outpost.goauthentik.io/`)
+      traefik.http.middlewares.authentik.forwardauth.address: https://docker.localhost/outpost.goauthentik.io/auth/traefik
+      traefik.http.middlewares.authentik.forwardauth.trustForwardHeader: true
+      traefik.http.middlewares.authentik.forwardauth.authResponseHeaders: X-authentik-username,X-authentik-groups,X-authentik-email,X-authentik-name,X-authentik-uid,X-authentik-jwt,X-authentik-meta-jwks,X-authentik-meta-outpost,X-authentik-meta-provider,X-authentik-meta-app,X-authentik-meta-version
+  reverse-proxy:
+    image: traefik:v2.9
+    command:
+    - "--api.insecure=false"
+    - "--providers.docker"
+    - "--providers.docker.exposedbydefault=false"
+    - "--certificatesresolvers.myresolver.acme.email=${MY_EMAIL}"
+    - "--certificatesresolvers.myresolver.acme.storage=acme.json"
+    - "--certificatesresolvers.myresolver.acme.caserver=${CA_SERVER}"
+    - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+    - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+    - "--certificatesresolvers.myresolver.acme.dnschallenge=true"
+    - "--certificatesresolvers.myresolver.acme.dnschallenge.provider=cloudflare"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "./apps/traefik/config.yml:/etc/traefik/config.yml:ro"
+      - "./apps/traefik/traefik.yml:/etc/traefik/traefik.yml:ro"
+      - "./apps/common/certs:/etc/certs"
+  kanboard:
+    image: kanboard/kanboard
+    ports:
+      - 4443:443
+    volumes:
+      - "./apps/kanboard/data:/var/www/app/data"
+      - "./apps/kanboard/plugins:/var/www/app/plugins"
+      - "./apps/common/certs:/etc/nginx/ssl:ro"
+    labels:
+      traefik.enable: true
+      traefik.http.routers.kanboard.entrypoints: websecure
+      traefik.http.routers.kanboard.tls.certresolver: myresolver
+      traefik.http.routers.kanboard.rule: Host(`kan.${MY_URL}`)
+      traefik.http.routers.kanboard.middlewares: authentik@docker
